@@ -23,11 +23,14 @@ def main():
         print(f"Worker [Process B]: 读取到挂起节点 -> {snapshot.next}")
         assert "approval_node" in snapshot.next
         
+        # 动态获取进程 A 挂起时落盘的真实挂起载荷，避免硬编码参数不匹配
+        p_call = snapshot.values.get("pending_call")
+        
         resume_cmd = Command(resume={
             "approved": True,
-            "tool_call_id": "call_trans_01",
-            "tool_name": "execute_transfer",
-            "args": {"amount": 1000.0, "recipient": "Alice", "idempotency_key": "idempotency-txn-day40-9999"}
+            "tool_call_id": p_call["tool_call_id"],
+            "tool_name": p_call["tool_name"],
+            "args": p_call["args"]
         })
         res = graph.invoke(resume_cmd, config=thread_config)
         print("Worker [Process B]: 恢复执行完成，最终答复:", res["messages"][-1].content)

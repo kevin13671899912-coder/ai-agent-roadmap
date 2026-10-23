@@ -1,5 +1,7 @@
 import os
 import sqlite3
+import re
+import uuid
 from typing import TypedDict, Optional, Annotated
 from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
 from langchain_core.tools import tool
@@ -51,10 +53,16 @@ def agent_node(state: AgentState) -> AgentState:
     if "历史" in last_msg or "流水" in last_msg:
         tool_calls.append({"id": "call_hist_01", "name": "get_transaction_history", "args": {}})
     elif "转账" in last_msg:
-        tx_id = "txn-day40-9999"
+        # 动态解析用户请求中的转账金额
+        match = re.search(r'(\d+)\s*元', last_msg)
+        amount = float(match.group(1)) if match else 1000.0
+        
+        # 动态派生唯一交易 ID 与幂等键
+        tx_id = f"txn-day40-{uuid.uuid4().hex[:6]}"
         idempotency_key = f"idempotency-{tx_id}"
+        
         tool_calls.append({"id": "call_bal_02", "name": "get_balance", "args": {}})
-        tool_calls.append({"id": "call_trans_01", "name": "execute_transfer", "args": {"amount": 1000.0, "recipient": "Alice", "idempotency_key": idempotency_key}})
+        tool_calls.append({"id": "call_trans_01", "name": "execute_transfer", "args": {"amount": amount, "recipient": "Alice", "idempotency_key": idempotency_key}})
     else:
         tool_calls.append({"id": "call_bal_01", "name": "get_balance", "args": {}})
 
@@ -208,4 +216,3 @@ def build_banking_graph(db_path: str = "official_checkpoints.db"):
     conn = sqlite3.connect(db_path, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
     return builder.compile(checkpointer=checkpointer), conn
-
