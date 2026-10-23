@@ -1,4 +1,3 @@
-%%writefile test_agent.py
 import os
 import subprocess
 import sys

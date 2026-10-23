@@ -1,4 +1,3 @@
-%%writefile banking_backend.py
 import sqlite3
 import json
 import logging
@@ -21,19 +20,23 @@ class ProductionBankingBackend:
             if not cursor.fetchone():
                 conn.execute("INSERT INTO accounts (id, balance) VALUES ('main', 5000.0)")
                 conn.execute("INSERT INTO transactions (tx_id, detail) VALUES ('tx-001', 'Initial Deposit: 5000.0')")
+                conn.commit()
 
     def get_balance(self) -> float:
+        self._init_db()  # 确保表和初始数据存在
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("SELECT balance FROM accounts WHERE id = 'main'")
             row = cursor.fetchone()
             return row[0] if row else 0.0
 
     def get_transaction_history(self) -> list:
+        self._init_db()
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("SELECT tx_id, detail FROM transactions")
             return [{"tx_id": r[0], "detail": r[1]} for r in cursor.fetchall()]
 
     def execute_transfer(self, amount: float, recipient: str, idempotency_key: str) -> dict:
+        self._init_db()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE;")
             try:

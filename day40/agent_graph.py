@@ -1,4 +1,3 @@
-%%writefile agent_graph.py
 import os
 import sqlite3
 from typing import TypedDict, Optional, Annotated
