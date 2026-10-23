@@ -45,40 +45,52 @@ class AgentState(TypedDict):
 
 def agent_node(state: AgentState) -> AgentState:
     messages = state["messages"]
-    # 模拟真实 LLM 根据上下文动态选择工具（实际生产可挂载 ChatOpenAI / ChatAnthropic）
     last_msg = messages[-1].content if messages else ""
     
     tool_calls = []
     if "历史" in last_msg or "流水" in last_msg:
         tool_calls.append({"id": "call_hist_01", "name": "get_transaction_history", "args": {}})
     elif "转账" in last_msg:
+        tx_id = "txn-day40-9999"
+        idempotency_key = f"idempotency-{tx_id}"
         tool_calls.append({"id": "call_bal_02", "name": "get_balance", "args": {}})
-        tool_calls.append({"id": "call_trans_01", "name": "execute_transfer", "args": {"amount": 1000.0, "recipient": "Alice", "idempotency_key": "idempotency-txn-day40-01"}})
+        tool_calls.append({"id": "call_trans_01", "name": "execute_transfer", "args": {"amount": 1000.0, "recipient": "Alice", "idempotency_key": idempotency_key}})
     else:
         tool_calls.append({"id": "call_bal_01", "name": "get_balance", "args": {}})
 
-    ai_msg = AIMessage(content=f"根据您的请求，我将为您执行相应操作。", tool_calls=tool_calls)
+    ai_msg = AIMessage(content="根据您的请求，我将为您执行相应操作。", tool_calls=tool_calls)
     return {"messages": [ai_msg]}
 
 def policy_gate_node(state: AgentState) -> AgentState:
-    last_ai = [m for m in state["messages"] if isinstance(m, AIMessage)][-1]
+    ai_msgs = [m for m in state["messages"] if isinstance(m, AIMessage)]
+    if not ai_msgs:
+        return {}
+    last_ai = ai_msgs[-1]
+    
     readonly_calls, pending = evaluate_policy(last_ai.tool_calls)
     
+    dropped_messages = []
+    for tc in last_ai.tool_calls:
+        if tc not in readonly_calls and (not pending or tc["id"] != pending["tool_call_id"]):
+            dropped_messages.append(ToolMessage(content="ERROR: POLICY_GATE_REJECTED", tool_call_id=tc["id"]))
+
     filtered_ai = AIMessage(content=last_ai.content, tool_calls=readonly_calls)
-    return {
+    
+    updates = {
         "filtered_ai_message": filtered_ai,
         "pending_call": pending
     }
+    if dropped_messages:
+        updates["messages"] = dropped_messages
+    return updates
 
 def tool_execution_router(state: AgentState) -> str:
     filtered_ai = state.get("filtered_ai_message")
-    # 如果有只读工具优先执行
     if filtered_ai and len(filtered_ai.tool_calls) > 0:
         return "run_readonly_tools"
-    # 如果存在待审批副作用工具，进入审批节点
     if state.get("pending_call"):
         return "go_to_approval"
-    return "finish_agent"
+    return "final_response"
 
 def readonly_tool_node(state: AgentState) -> AgentState:
     filtered_ai = state["filtered_ai_message"]
@@ -106,7 +118,6 @@ def revalidate_node(state: AgentState) -> AgentState:
         err_msg = ToolMessage(content=f"ERROR: {status}", tool_call_id=p_call["tool_call_id"])
         return {"messages": [err_msg]}
 
-    # 校验通过，构建合法的受信任 Tool Call 准备交由 ToolNode 执行
     authorized_ai = AIMessage(content="Authorized execution", tool_calls=[{
         "id": p_call["tool_call_id"],
         "name": p_call["tool_name"],
@@ -117,13 +128,35 @@ def revalidate_node(state: AgentState) -> AgentState:
 def post_revalidation_router(state: AgentState) -> str:
     last_msg = state["messages"][-1] if state["messages"] else None
     if isinstance(last_msg, ToolMessage) and "ERROR" in str(last_msg.content):
-        return "skip_tools"
+        return "final_response"
     return "execute_via_tool_node"
 
 def authorized_tool_node(state: AgentState) -> AgentState:
     filtered_ai = state["filtered_ai_message"]
     res = tool_node_executor.invoke({"messages": [filtered_ai]})
     return {"messages": res["messages"]}
+
+def final_response_node(state: AgentState) -> AgentState:
+    messages = state["messages"]
+    last_msg = messages[-1] if messages else None
+    
+    if isinstance(last_msg, ToolMessage):
+        content_str = str(last_msg.content)
+        if "ERROR" in content_str:
+            reply = AIMessage(content=f"抱歉，您的请求未能完成，原因：{content_str}")
+        elif "remaining_balance" in content_str or "transferred" in content_str:
+            bal = backend.get_balance()
+            reply = AIMessage(content=f"转账执行成功！当前账户余额为 {bal} 元。")
+        elif "balance" in content_str:
+            reply = AIMessage(content=f"查询成功，{content_str}")
+        elif "history" in content_str:
+            reply = AIMessage(content=f"交易历史查询成功：{content_str}")
+        else:
+            reply = AIMessage(content=f"操作已执行，结果：{content_str}")
+    else:
+        reply = AIMessage(content="您的请求已处理完毕。")
+        
+    return {"messages": [reply]}
 
 def build_banking_graph(db_path: str = "official_checkpoints.db"):
     builder = StateGraph(AgentState)
@@ -134,6 +167,7 @@ def build_banking_graph(db_path: str = "official_checkpoints.db"):
     builder.add_node("approval_node", approval_node)
     builder.add_node("revalidate_node", revalidate_node)
     builder.add_node("authorized_tool_node", authorized_tool_node)
+    builder.add_node("final_response", final_response_node)
     
     builder.add_edge(START, "agent")
     builder.add_edge("agent", "policy_gate")
@@ -144,17 +178,16 @@ def build_banking_graph(db_path: str = "official_checkpoints.db"):
         {
             "run_readonly_tools": "readonly_tool_node",
             "go_to_approval": "approval_node",
-            "finish_agent": END
+            "final_response": "final_response"
         }
     )
     
-    # 只读工具执行完后，若无高危操作则结束，若有则进审批
     builder.add_conditional_edges(
         "readonly_tool_node",
-        lambda s: "go_to_approval" if s.get("pending_call") else "finish_agent",
+        lambda s: "go_to_approval" if s.get("pending_call") else "final_response",
         {
             "go_to_approval": "approval_node",
-            "finish_agent": END
+            "final_response": "final_response"
         }
     )
     
@@ -165,12 +198,14 @@ def build_banking_graph(db_path: str = "official_checkpoints.db"):
         post_revalidation_router,
         {
             "execute_via_tool_node": "authorized_tool_node",
-            "skip_tools": END
+            "final_response": "final_response"
         }
     )
     
-    builder.add_edge("authorized_tool_node", END)
+    builder.add_edge("authorized_tool_node", "final_response")
+    builder.add_edge("final_response", END)
     
     conn = sqlite3.connect(db_path, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
     return builder.compile(checkpointer=checkpointer), conn
+

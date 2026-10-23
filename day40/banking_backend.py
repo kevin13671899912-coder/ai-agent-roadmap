@@ -23,7 +23,7 @@ class ProductionBankingBackend:
                 conn.commit()
 
     def get_balance(self) -> float:
-        self._init_db()  # 确保表和初始数据存在
+        self._init_db()
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("SELECT balance FROM accounts WHERE id = 'main'")
             row = cursor.fetchone()
@@ -64,3 +64,5 @@ class ProductionBankingBackend:
             except Exception as e:
                 conn.rollback()
                 raise e
+
+
